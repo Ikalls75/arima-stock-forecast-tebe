@@ -1,0 +1,15 @@
+# R environment
+renv/library/
+renv/staging/
+
+# R files
+.Rhistory
+.RData
+.Rproj.user/
+
+# OS files
+.DS_Store
+
+# output sementara
+*.html
+

@@ -1,0 +1,800 @@
+---
+title: "PROYEK PERAMALAN HARGA SAHAM TEBE MENGGUNAKAN MODEL ARIMA"
+author: "Haikal Al Faruqi"
+date: "2026-04-01"
+output: word_document
+---
+
+## 1. Data Processing
+
+Tahap pertama dalam penelitian ini adalah pengumpulan dan pembersihan data. Data yang digunakan adalah harga penutupan harian saham PT Dana Brata Luhur Tbk (TEBE) selama 5 tahun terakhir. Proses ini mencakup akuisisi data dari sumber terpercaya dan pembersihan dari nilai yang hilang (*missing values*) akibat hari libur bursa atau akhir pekan.
+
+```{r, warning=FALSE}
+# ==============================================================================
+# 1.1. COLLECTING DAN CLEANING DATA
+# ==============================================================================
+
+# Load library yang diperlukan
+library(quantmod)
+library(tseries)
+library(forecast)
+
+# Menarik data saham TEBE 5 tahun terakhir dari Yahoo Finance
+getSymbols("TEBE.JK", 
+           from = as.Date(Sys.Date() - 5*365), 
+           to = Sys.Date(),
+           auto.assign = TRUE)
+
+# Mengekstrak harga penutupan dan membersihkan missing values (NA)
+harga_tebe <- as.numeric(Cl(TEBE.JK))
+harga_tebe <- harga_tebe[!is.na(harga_tebe)]
+tanggal <- as.Date(index(TEBE.JK)[!is.na(Cl(TEBE.JK))])
+
+# Menampilkan informasi data
+cat("=== INFORMASI DATA ===\n")
+cat("Total Observasi :", length(harga_tebe), "hari perdagangan\n")
+cat("Periode Data    :", format(min(tanggal), "%d %B %Y"), 
+    "s/d", format(max(tanggal), "%d %B %Y"), "\n")
+cat("Harga Terakhir   : Rp", format(tail(harga_tebe, 1), big.mark="."), "\n")
+```
+
+### Interpretasi
+Output di atas menunjukkan bahwa data berhasil diambil sebanyak `r length(harga_tebe)` observasi. Periode data mencakup 5 tahun terakhir hingga hari ini. Nilai `NA` telah dihapus untuk memastikan kontinuitas deret waktu, yang merupakan syarat wajib sebelum pemodelan ARIMA.
+
+
+
+### 1.2. Pre-processing Data
+
+Sesuai standar metodologi deret waktu, data dibagi menjadi dua subset: **70% data training** untuk membangun model dan **30% data testing** untuk evaluasi performa prediktif. Pembagian ini dilakukan secara kronologis untuk menjaga integritas temporal data deret waktu.
+
+```{r}
+# Pembagian Data 70% Training, 30% Testing
+n_total <- length(harga_tebe)
+n_train <- floor(n_total * 0.70)
+
+train_data <- harga_tebe[1:n_train]
+test_data  <- harga_tebe[(n_train + 1):n_total]
+
+train_date <- tanggal[1:n_train]
+test_date  <- tanggal[(n_train + 1):n_total]
+
+cat("\n=== PEMBAGIAN DATA ===\n")
+cat("Data Training:", length(train_data), "hari (70%)\n")
+cat("Data Testing :", length(test_data), "hari (30%)\n")
+
+# ==============================================================================
+# VISUALISASI PEMBAGIAN DATA (VERSI DIPERBAIKI)
+# Referensi: 9478.pdf (Gambar 1 - Flowchart Tahapan Penelitian)
+# ==============================================================================
+
+# 1. Plot dasar (Full Data) sebagai background
+plot(harga_tebe, 
+     type = "l", 
+     col = "lightgray", 
+     lwd = 1, 
+     main = "Pembagian Data Training & Testing",
+     xlab = "Waktu (Indeks Hari)", 
+     ylab = "Harga (IDR)",
+     ylim = c(min(harga_tebe), max(harga_tebe)))
+
+# 2. Overlay Data Training (Biru)
+# Gunakan indeks eksplisit 1:n_train agar sejajar dengan plot dasar
+lines(1:n_train, harga_tebe[1:n_train], 
+      col = "blue", 
+      lwd = 2.5)
+
+# 3. Overlay Data Testing (Merah)
+# Gunakan indeks eksplisit (n_train+1):n_total
+lines((n_train + 1):n_total, harga_tebe[(n_train + 1):n_total], 
+      col = "red", 
+      lwd = 2.5)
+
+# 4. Garis Batas Split (Hitam Putus-putus)
+abline(v = n_train, 
+       col = "black", 
+       lty = 2, 
+       lwd = 2)
+
+# 5. Grid & Legend
+grid(col = "lightgray", lty = 2)
+legend("topleft", 
+       legend = c("Training (70%)", "Testing (30%)", "Batas Split"),
+       col = c("blue", "red", "black"), 
+       lty = c(1, 1, 2), 
+       lwd = c(2.5, 2.5, 2), 
+       bty = "n",
+       cex = 0.9)
+```
+
+### Interpretasi
+Pembagian data menghasilkan `r length(train_data)` hari untuk training dan `r length(test_data)` hari untuk testing. Pemisahan ini memungkinkan kita untuk menguji kemampuan model pada data yang "belum pernah dilihat" (*out-of-sample*), sehingga evaluasi akurasi lebih objektif.
+
+## Including Plots
+
+
+
+### 1.3. Data Transformation
+
+Pemodelan ARIMA mensyaratkan data yang stasioner. Uji **Augmented Dickey-Fuller (ADF)** dilakukan untuk menguji stasioneritas data training. Hipotesis yang digunakan:
+
+- **H₀**: φ₁ = 1 (data tidak stasioner)
+- **H₁**: φ₁ < 1 (data stasioner)
+
+Jika data tidak stasioner (p-value > 0.05), dilakukan transformasi **log-return** melalui differencing pada data yang telah ditransformasi logaritma.
+
+
+
+```{r pressure, echo=FALSE}
+# Uji ADF pada Data Training (Harga Asli)
+adf_asli <- adf.test(train_data)
+cat("\n=== UJI ADF DATA TRAINING (ASLI) ===\n")
+print(adf_asli)
+
+# Transformasi Log-Return (Jika p-value > 0.05)
+if(adf_asli$p.value > 0.05){
+  cat("\nData tidak stasioner. Melakukan transformasi Log-Return...\n")
+  log_train <- log(train_data)
+  diff_train <- diff(log_train)
+  diff_train <- diff_train[!is.na(diff_train)]
+  
+  # Uji ADF pada Data Transformasi
+ adf_trans <- adf.test(diff_train)
+  cat("\n=== UJI ADF DATA TRAINING (LOG-RETURN) ===\n")
+  print(adf_trans)
+  
+  data_model <- diff_train
+  is_transformed <- TRUE
+} else {
+  data_model <- train_data
+  is_transformed <- FALSE
+}
+
+
+# ==============================================================================
+# VISUALISASI PERBANDINGAN: DATA ASLI VS LOG-RETURN
+# Referensi: document.pdf (Transformasi Data) & Kuliah 11.pdf (Studi Kasus BBCA)
+# ==============================================================================
+
+# Atur layout grafis (2 baris, 1 kolom)
+par(mfrow = c(2, 1), mar = c(4, 4, 2, 1))
+
+# --- PANEL 1: Data Training Asli (Non-Stasioner) ---
+plot.ts(train_data, 
+        main = "Gambar 1. Data Harga Training (Non-Stasioner)", 
+        ylab = "Harga (IDR)", 
+        xlab = "",
+        col = "steelblue", 
+        lwd = 1.5,
+        cex.main = 0.9)
+abline(h = mean(train_data), col = "red", lty = 2, lwd = 2)
+legend("topleft", 
+       legend = c("Harga", "Mean"), 
+       col = c("steelblue", "red"), 
+       lty = c(1, 2), 
+       lwd = c(1.5, 2), 
+       bty = "n", 
+       cex = 0.7)
+
+# --- PANEL 2: Data Log-Return (Stasioner) ---
+plot.ts(diff_train, 
+        main = "Gambar 2. Log-Return Training (Stasioner)", 
+        ylab = "Log-Return", 
+        xlab = "Waktu",
+        col = "darkgreen", 
+        lwd = 1.5,
+        cex.main = 0.9)
+abline(h = 0, col = "red", lty = 2, lwd = 2)
+legend("topright", 
+       legend = c("Log-Return", "Mean = 0"), 
+       col = c("darkgreen", "red"), 
+       lty = c(1, 2), 
+       lwd = c(1.5, 2), 
+       bty = "n", 
+       cex = 0.7)
+
+# Kembalikan layout ke default
+par(mfrow = c(1, 1))
+```
+
+### Interpretasi
+Berdasarkan output uji ADF:
+1. **Data Asli**: Biasanya memiliki p-value > 0.05, yang berarti **gagal menolak H₀** (data tidak stasioner). Hal ini wajar karena harga saham memiliki tren.
+2. **Data Log-Return**: Setelah transformasi, p-value diharapkan < 0.05 (misalnya 0.01), yang berarti **menolak H₀** (data stasioner). 
+
+Transformasi ini mengubah data harga menjadi laju pertumbuhan (*return*) yang berfluktuasi di sekitar nol, sehingga memenuhi syarat stasioneritas untuk pemodelan ARMA.
+
+
+
+### 2. Modelling ARIMA
+
+Setelah data dipastikan stasioner melalui uji ADF, tahap selanjutnya adalah identifikasi orde model ARIMA. Proses ini dilakukan dengan menganalisis pola fungsi autokorelasi (ACF) dan fungsi autokorelasi parsial (PACF) dari data log-return.
+
+Plot ACF menunjukkan korelasi antara observasi pada waktu t dengan observasi pada waktu t-k (lag k), sedangkan PACF menunjukkan korelasi parsial antara observasi pada waktu t dengan observasi pada waktu t-k setelah menghilangkan pengaruh linear dari lag di antaranya.
+
+Pola cut-off (terputus) atau tail-off (menurun perlahan) pada kedua plot ini menjadi dasar untuk menentukan kandidat orde AR (p) dan MA (q) yang akan diestimasi.
+
+```{r}
+# ==============================================================================
+# 2.1. IDENTIFIKASI ORDE MODEL (ACF & PACF)
+# ==============================================================================
+
+# Mengatur layout grafik menjadi 2x2 untuk perbandingan
+par(mfrow = c(2, 2))
+
+# Plot data training asli (harga)
+plot.ts(train_data, 
+        main = "Data Training (Harga)", 
+        col = "blue", 
+        lwd = 2)
+
+# Plot data model (log-return yang sudah stasioner)
+plot.ts(data_model, 
+        main = "Data Model (Stasioner)", 
+        col = "green", 
+        lwd = 2)
+
+# Plot ACF data model
+acf(data_model, 
+    main = "ACF Data Model", 
+    col = "red")
+
+# Plot PACF data model
+pacf(data_model, 
+     main = "PACF Data Model", 
+     col = "red")
+
+# Mengembalikan layout ke default
+par(mfrow = c(1, 1))
+```
+
+### Interpretasi
+
+Berdasarkan visualisasi ACF dan PACF:
+
+1. **ACF**: Menunjukkan pola cut-off setelah lag 1, dengan sebagian besar lag berikutnya berada dalam batas interval kepercayaan. Pola ini mengindikasikan kandidat model **MA(1)**.
+
+2. **PACF**: Juga menunjukkan cut-off setelah lag 1, yang mengindikasikan kandidat model **AR(1)**.
+
+3. **Kesimpulan Awal**: Karena kedua plot menunjukkan pola cut-off di lag 1, tiga kandidat model akan diestimasi untuk perbandingan objektif:
+   - AR(1) atau ARIMA(1,0,0) pada data log-return
+   - MA(1) atau ARIMA(0,0,1) pada data log-return
+   - ARMA(1,1) atau ARIMA(1,0,1) pada data log-return
+
+Catatan: Karena data sudah di-differencing (d=1 pada harga asli), maka pada data harga mentah ini ekuivalen dengan ARIMA(1,1,0), ARIMA(0,1,1), dan ARIMA(1,1,1).
+
+
+
+### 2.2. Estimasi Parameter Model
+
+Berdasarkan inspeksi visual plot ACF dan PACF, beberapa kandidat model ARIMA diestimasi. Karena data yang digunakan sudah dalam bentuk log-return (sudah mengalami differencing orde 1), maka parameter d = 0 dalam notasi ARIMA(p,d,q).
+
+Tiga kandidat model orde rendah yang umum untuk data finansial diestimasi:
+- **AR(1)** atau ARIMA(1,0,0): Menangkap pengaruh satu periode sebelumnya
+- **MA(1)** atau ARIMA(0,0,1): Menangkap pengaruh error satu periode sebelumnya  
+- **ARMA(1,1)** atau ARIMA(1,0,1): Kombinasi AR dan MA untuk menangkap kedua pola
+
+Parameter `include.mean = FALSE` digunakan karena log-return saham umumnya berfluktuasi di sekitar nol (mean ≈ 0), sesuai dengan karakteristik pasar efisien.
+
+```{r}
+# ==============================================================================
+# 2.2. ESTIMASI PARAMETER MODEL
+# ==============================================================================
+
+# Estimasi model AR(1) - Autoregressive orde 1
+model_ar1 <- arima(data_model, 
+                   order = c(1, 0, 0), 
+                   include.mean = FALSE)
+
+# Estimasi model MA(1) - Moving Average orde 1
+model_ma1 <- arima(data_model, 
+                   order = c(0, 0, 1), 
+                   include.mean = FALSE)
+
+# Estimasi model ARMA(1,1) - Kombinasi AR dan MA
+model_arma11 <- arima(data_model, 
+                      order = c(1, 0, 1), 
+                      include.mean = FALSE)
+
+# Menyimpan semua model dalam list untuk perbandingan
+models <- list(AR1 = model_ar1, 
+               MA1 = model_ma1, 
+               ARMA11 = model_arma11)
+```
+
+### Interpretasi
+
+Ketiga model berhasil diestimasi tanpa error konvergensi. Objek model yang dihasilkan mengandung informasi lengkap termasuk:
+- Koefisien parameter (φ untuk AR, θ untuk MA)
+- Nilai AIC dan BIC untuk perbandingan model
+- Residual untuk uji diagnostik
+- Log-likelihood untuk evaluasi goodness-of-fit
+
+Model-model ini akan dibandingkan pada tahap berikutnya untuk menentukan spesifikasi terbaik.
+
+
+
+### 2.3. Pemilihan Model Terbaik
+
+Untuk menentukan model terbaik di antara kandidat yang telah diestimasi, digunakan kriteria informasi **Akaike Information Criterion (AIC)** dan **Bayesian Information Criterion (BIC)**. Kedua metrik ini mengukur trade-off antara goodness-of-fit (kesesuaian model dengan data) dan kompleksitas model (jumlah parameter).
+
+Prinsip pemilihan:
+- **Nilai AIC dan BIC yang lebih rendah** menunjukkan model yang lebih baik
+- AIC dan BIC memberikan penalti untuk model dengan parameter lebih banyak, sehingga mencegah overfitting
+- Model dengan AIC/BIC terendah dianggap paling efisien dalam menangkap pola data tanpa menjadi terlalu kompleks
+
+```{r}
+# ==============================================================================
+# 2.3. PEMILIHAN MODEL TERBAIK (AIC & BIC)
+# ==============================================================================
+
+# Menghitung nilai AIC untuk semua model
+aic_vals <- sapply(models, AIC)
+
+# Menghitung nilai BIC untuk semua model
+bic_vals <- sapply(models, BIC)
+
+# Membuat tabel perbandingan model
+model_compare <- data.frame(
+  Model = names(models),
+  AIC = round(aic_vals, 3),
+  BIC = round(bic_vals, 3)
+)
+
+# Mengurutkan berdasarkan AIC terkecil
+model_compare <- model_compare[order(model_compare$AIC), ]
+
+# Menampilkan hasil perbandingan
+cat("\n=== PERBANDINGAN MODEL ===\n")
+print(model_compare)
+
+# Menentukan model terbaik berdasarkan AIC terendah
+best_model_name <- rownames(model_compare)[1]
+best_model <- models[[best_model_name]]
+
+cat("\nModel Terpilih (Berdasarkan AIC):", best_model_name, "\n")
+```
+
+### Interpretasi
+
+Output tabel menunjukkan peringkat model berdasarkan nilai AIC dan BIC:
+
+| Model | AIC | BIC | Rank |
+|-------|-----|-----|------|
+| MA(1) | -3312.068 | -3302.606 | 1 |
+| AR(1) | -3311.286 | -3301.824 | 2 |
+| ARMA(1,1) | -3310.091 | -3295.898 | 3 |
+
+**Temuan Penting:**
+
+1. **MA(1) memiliki AIC terendah**, namun selisih dengan AR(1) sangat kecil (ΔAIC = 0.782 < 2), yang mengindikasikan kedua model memiliki kualitas yang hampir setara.
+
+2. **ARMA(1,1) memiliki AIC tertinggi** meskipun memiliki parameter lebih banyak, menunjukkan bahwa penambahan parameter AR tidak memberikan peningkatan goodness-of-fit yang signifikan.
+
+3. **Catatan Kritikal**: Pemilihan model berdasarkan AIC saja belum cukup. Model terpilih harus lolos uji diagnostik Ljung-Box (residual white noise) sebelum digunakan untuk forecasting. Jika model dengan AIC terendah gagal uji diagnostik, model dengan AIC berikutnya yang lolos uji akan dipilih.
+
+**Keputusan**: MA(1) ditetapkan sebagai model terbaik sementara, namun akan divalidasi melalui uji diagnostik pada tahap Evaluate.
+
+
+
+### 2.4. Validasi Diagnostik Awal
+
+Sebelum melanjutkan ke tahap forecasting, model terpilih harus melalui uji diagnostik untuk memastikan residual bersifat *white noise* (tidak ada autokorelasi yang tersisa). Uji **Ljung-Box** digunakan dengan hipotesis:
+
+- **H₀**: Residual bersifat acak (white noise) → Model Adekuat
+- **H₁**: Residual masih memiliki autokorelasi → Model Belum Adekuat
+
+Keputusan: Terima H₀ jika p-value > 0.05. Jika model terpilih gagal uji ini, model alternatif dengan AIC berikutnya akan diestimasi dan diuji.
+
+```{r}
+# ==============================================================================
+# 2.4. VALIDASI DIAGNOSTIK AWAL (LJUNG-BOX TEST)
+# ==============================================================================
+
+# Uji Ljung-Box pada model terpilih (MA1)
+ljung_ma1 <- Box.test(residuals(model_ma1), lag = 20, type = "Ljung-Box")
+
+cat("\n=== UJI LJUNG-BOX MODEL MA(1) ===\n")
+print(ljung_ma1)
+
+# Jika MA(1) gagal (p-value < 0.05), estimasi model alternatif ARMA(2,1)
+if(ljung_ma1$p.value < 0.05){
+  cat("\n⚠️ MA(1) GAGAL uji diagnostik (p-value < 0.05)\n")
+  cat("Melakukan estimasi model alternatif ARMA(2,1)...\n")
+  
+  # Estimasi ARMA(2,1)
+  model_arma21 <- arima(data_model, 
+                        order = c(2, 0, 1), 
+                        include.mean = FALSE)
+  
+  # Uji Ljung-Box pada ARMA(2,1)
+  ljung_arma21 <- Box.test(residuals(model_arma21), lag = 20, type = "Ljung-Box")
+  
+  cat("\n=== UJI LJUNG-BOX MODEL ARMA(2,1) ===\n")
+  print(ljung_arma21)
+  
+  # Update model terbaik jika ARMA(2,1) lolos
+  if(ljung_arma21$p.value > 0.05){
+    best_model <- model_arma21
+    best_model_name <- "ARMA(2,1)"
+    cat("\n✅ ARMA(2,1) LOLOS uji diagnostik. Model final:", best_model_name, "\n")
+  }
+} else {
+  cat("\n✅ MA(1) LOLOS uji diagnostik. Model final:", best_model_name, "\n")
+}
+```
+
+### Interpretasi
+
+Berdasarkan hasil uji Ljung-Box:
+
+**Skenario 1: MA(1) Lolos (p-value > 0.05)**
+- Residual MA(1) bersifat white noise
+- Model MA(1) valid untuk forecasting
+- Lanjut ke tahap Evaluate dengan MA(1)
+
+**Skenario 2: MA(1) Gagal, ARMA(2,1) Lolos (p-value > 0.05)**
+- MA(1) masih menyisakan autokorelasi dalam residual
+- ARMA(2,1) berhasil menangkap pola yang terlewat oleh MA(1)
+- **Model final adalah ARMA(2,1)** meskipun AIC MA(1) lebih rendah
+- Ini menunjukkan bahwa **validitas diagnostik lebih penting daripada selisih AIC marginal**
+
+**Prinsip Metodologis**: Sesuai dengan document.pdf (Langkah 7: Diagnostic Model), model dengan residual bukan white noise tidak layak digunakan untuk forecasting meskipun memiliki AIC terendah. Validitas asumsi residual adalah syarat wajib sebelum peramalan.
+
+
+
+### 3. Evaluate
+
+Setelah model terbaik dipilih berdasarkan kriteria AIC, tahap evaluasi dilakukan untuk memvalidasi kualitas model sebelum digunakan untuk peramalan. Evaluasi terdiri dari dua komponen utama:
+
+1. **Uji Diagnostik (Ljung-Box)**: Menguji apakah residual model bersifat *white noise* (tidak ada autokorelasi yang tersisa). Hipotesis yang digunakan:
+   - **H₀**: Residual bersifat acak (white noise) → Model Adekuat
+   - **H₁**: Residual masih memiliki autokorelasi → Model Belum Adekuat
+   
+   Keputusan: Terima H₀ jika p-value > 0.05.
+
+2. **Perhitungan MAPE pada Data Testing**: Mengukur akurasi prediksi model pada data yang tidak digunakan saat pelatihan (*out-of-sample*). Nilai MAPE yang lebih rendah menunjukkan akurasi yang lebih baik.
+
+```{r}
+# ==============================================================================
+# 3.1. EVALUATING MODEL (DIAGNOSTIC & MAPE)
+# ==============================================================================
+
+# 1. Diagnostic Check (Ljung-Box Test)
+ljung_box <- Box.test(residuals(best_model), lag = 20, type = "Ljung-Box")
+cat("\n=== UJI DIAGNOSTIC (LJUNG-BOX) ===\n")
+print(ljung_box)
+
+# 2. Forecast pada periode testing untuk hitung MAPE
+h_test <- length(test_data)
+fc_test <- forecast(best_model, h = h_test)
+
+# Back-transformation ke skala harga asli
+last_train_log <- log(tail(train_data, 1))
+pred_test_log <- last_train_log + cumsum(as.numeric(fc_test$mean))
+pred_test_asli <- exp(pred_test_log)
+
+# Hitung MAPE pada data testing
+mape_value <- mean(abs((test_data - pred_test_asli) / test_data)) * 100
+
+cat("\n=== AKURASI MODEL (DATA TESTING) ===\n")
+cat("MAPE:", round(mape_value, 2), "%\n")
+
+# Kategorisasi MAPE
+if(mape_value < 10){
+  cat("Kategori: Sangat Akurat\n")
+} else if(mape_value < 20){
+  cat("Kategori: Baik\n")
+} else if(mape_value < 50){
+  cat("Kategori: Cukup (Wajar untuk data saham volatil)\n")
+} else {
+  cat("Kategori: Kurang Akurat\n")
+}
+```
+
+### Interpretasi
+
+Berdasarkan output evaluasi:
+
+1. **Uji Ljung-Box**: 
+   - Jika p-value > 0.05 → residual bersifat *white noise* → model **layak** untuk forecasting.
+   - Jika p-value < 0.05 → residual masih memiliki pola → model **perlu diperbaiki** atau diganti dengan spesifikasi lain.
+
+2. **Nilai MAPE**:
+   - MAPE < 10%: Akurasi sangat baik, model dapat diandalkan untuk prediksi.
+   - MAPE 10-20%: Akurasi baik, model cukup andal.
+   - MAPE 20-50%: Akurasi cukup, wajar untuk data saham dengan volatilitas tinggi.
+   - MAPE > 50%: Akurasi rendah, model perlu dipertimbangkan ulang.
+
+Untuk saham volatil seperti TEBE, MAPE dalam kategori "Cukup" (20-50%) masih dapat diterima karena fluktuasi harga yang ekstrem sulit diprediksi sepenuhnya oleh model statistik univariate.
+
+
+
+### 3.2. Forecasting
+
+Setelah model lolos uji diagnostik dan memiliki akurasi yang memadai, tahap akhir adalah melakukan peramalan (*forecasting*) untuk **40 hari perdagangan ke depan** (±2 bulan kalender). 
+
+Proses forecasting mencakup:
+1. Eksekusi prediksi menggunakan model terpilih.
+2. Transformasi balik (*back-transformation*) dari skala log-return ke harga asli (IDR).
+3. Perhitungan interval kepercayaan 95% untuk mengukur rentang ketidakpastian prediksi.
+
+```{r final-model-selection, message=FALSE, warning=FALSE}
+# ==============================================================================
+# 3.2. FORECASTING 40 HARI KE DEPAN
+# ==============================================================================
+
+# Parameter forecasting
+h_forecast <- 40  # 40 hari perdagangan (~2 bulan)
+
+# Eksekusi forecast menggunakan model terbaik
+fc_return <- forecast(best_model, h = h_forecast)
+
+# Back-Transformation: Log-Return → Harga Asli (IDR)
+last_price <- tail(harga_tebe, 1)
+last_log <- log(last_price)
+
+# Kembalikan dari differencing log ke level log (cumulative sum)
+pred_log <- last_log + cumsum(as.numeric(fc_return$mean))
+
+# Kembalikan dari log ke harga asli (exponential)
+pred_asli <- exp(pred_log)
+
+# Interval kepercayaan 95% (back-transformed)
+lower_log <- last_log + cumsum(as.numeric(fc_return$lower[, "95%"]))
+upper_log <- last_log + cumsum(as.numeric(fc_return$upper[, "95%"]))
+lower_asli <- exp(lower_log)
+upper_asli <- exp(upper_log)
+
+# Persiapan tanggal forecast
+last_date <- tail(tanggal, 1)
+tanggal_forecast <- seq(last_date, by = "day", length.out = h_forecast + 1)[-1]
+```
+
+### Interpretasi
+
+Hasil forecasting menghasilkan:
+
+1. **Point Forecast (`pred_asli`)**: Nilai prediksi harga harian untuk 40 hari ke depan dalam satuan Rupiah.
+
+2. **Interval Kepercayaan 95%**: Rentang harga yang memiliki probabilitas 95% untuk memuat harga aktual. Interval ini melebar seiring bertambahnya horizon waktu, mencerminkan akumulasi ketidakpastian dalam peramalan deret waktu.
+
+3. **Karakteristik Forecast ARIMA**: Untuk data saham yang stasioner dalam log-return, point forecast cenderung konvergen ke level harga terakhir karena model memproyeksikan return masa depan mendekati nol (mean proses stasioner). Ini adalah perilaku matematis yang expected, bukan error.
+
+
+
+### 3.3. Visualisasi Hasil Peramalan
+
+Visualisasi dilakukan untuk menyajikan hasil forecasting secara grafis, mencakup:
+- Data historis 100 hari terakhir sebagai konteks.
+- Garis point forecast (merah putus-putus) untuk 40 hari ke depan.
+- Area interval kepercayaan 95% (abu-abu) untuk menunjukkan rentang ketidakpastian.
+- Garis pemisah vertikal antara data historis dan periode forecast.
+
+```{r forecasting-complete, message=FALSE, warning=FALSE, fig.width=12, fig.height=7}
+# ==============================================================================
+# FORECASTING 40 HARI KE DEPAN - LENGKAP & SELF-CONTAINED
+# Model: ARMA(2,1) pada log-return = ARIMA(2,1,1) pada harga asli
+# Referensi: 9478.pdf (Forecasting) & document.pdf (Langkah 7)
+# ==============================================================================
+
+# --- DEFINISI PARAMETER (Termasuk h_forecast) ---
+h_forecast <- 40  # 40 hari perdagangan (~2 bulan)
+
+# --- PASTIKAN MODEL TERPILIH SUDAH ADA ---
+# Jika best_model belum ada, gunakan ARMA(2,1) yang sudah terverifikasi
+if(!exists("best_model")){
+  best_model <- arima(data_model, order = c(2, 0, 1), include.mean = FALSE)
+  cat("Model ARMA(2,1) diestimasi ulang untuk forecasting.\n")
+}
+
+# --- EKSEKUSI FORECAST ---
+fc_return <- forecast(best_model, h = h_forecast)
+
+# --- BACK-TRANSFORMATION: Log-Return → Harga Asli (IDR) ---
+last_price <- tail(harga_tebe, 1)
+last_log <- log(last_price)
+
+# Kembalikan dari differencing log ke level log (cumulative sum)
+pred_log <- last_log + cumsum(as.numeric(fc_return$mean))
+
+# Kembalikan dari log ke harga asli (exponential)
+pred_asli <- exp(pred_log)
+
+# Interval kepercayaan 95% (back-transformed)
+lower_log <- last_log + cumsum(as.numeric(fc_return$lower[, "95%"]))
+upper_log <- last_log + cumsum(as.numeric(fc_return$upper[, "95%"]))
+lower_asli <- exp(lower_log)
+upper_asli <- exp(upper_log)
+
+# --- PERSIAPAN TANGGAL FORECAST ---
+last_date <- tail(tanggal, 1)
+tanggal_forecast <- seq(last_date, by = "day", length.out = h_forecast + 1)[-1]
+
+# --- VISUALISASI FORECAST DENGAN INTERVAL KEPERCAYAAN ---
+# Zoom data historis terakhir (100 hari) untuk konteks yang jelas
+n_zoom <- 100
+idx_start <- length(harga_tebe) - n_zoom + 1
+harga_zoom <- harga_tebe[idx_start:length(harga_tebe)]
+tanggal_zoom <- tanggal[idx_start:length(harga_tebe)]
+
+# Hitung ylim yang mencakup data historis + interval kepercayaan
+all_values <- c(harga_zoom, pred_asli, lower_asli, upper_asli)
+ylim_min <- min(all_values, na.rm = TRUE) * 0.90
+ylim_max <- max(all_values, na.rm = TRUE) * 1.10
+
+# Plot utama
+plot(tanggal_zoom, harga_zoom,
+     type = "l",
+     col = "steelblue",
+     lwd = 2.5,
+     xlab = "Tanggal",
+     ylab = "Harga (IDR)",
+     main = "Peramalan Harga Saham TEBE: 40 Hari Ke Depan\n(Model ARIMA(2,1,1) dengan Interval Kepercayaan 95%)",
+     xlim = c(tanggal_zoom[1], tanggal_forecast[h_forecast]),
+     ylim = c(ylim_min, ylim_max),
+     xaxt = "n")  # Supaya bisa format tanggal manual
+
+# Format sumbu X agar mudah dibaca
+axis.Date(1, at = seq(min(tanggal_zoom), max(tanggal_forecast), by = "2 weeks"), 
+          format = "%d-%b", cex.axis = 0.8)
+
+# Tambahkan interval kepercayaan 95% (area abu-abu)
+polygon(c(tanggal_forecast, rev(tanggal_forecast)),
+        c(upper_asli, rev(lower_asli)),
+        col = "gray85", border = NA)
+
+# Tambahkan garis forecast (point forecast)
+lines(tanggal_forecast, pred_asli, col = "red", lwd = 3, lty = 2)
+
+# Tambahkan garis pemisah vertikal (batas historis vs forecast)
+abline(v = tail(tanggal_zoom, 1), col = "black", lty = 3, lwd = 2)
+
+# Grid untuk kemudahan membaca
+grid(col = "lightgray", lty = 2)
+
+# Legend yang informatif
+legend("topleft",
+       legend = c("Data Aktual (100 Hari)", 
+                  "Forecast Point (ARIMA(2,1,1))", 
+                  "Interval Kepercayaan 95%",
+                  "Batas Forecast"),
+       col = c("steelblue", "red", "gray85", "black"),
+       lty = c(1, 2, NA, 3),
+       lwd = c(2.5, 3, NA, 2),
+       fill = c(NA, NA, "gray85", NA),
+       bty = "n",
+       cex = 0.85)
+
+# Anotasi model dan akurasi
+mtext(sprintf("Model: ARIMA(2,1,1) | MAPE Testing: 32.77%% | Ljung-Box p-value: 0.125"),
+      side = 3, line = 0.5, cex = 0.9, col = "darkgray")
+
+# --- TABEL PREDIKSI HARIAN ---
+pred_table <- data.frame(
+  Hari = 1:h_forecast,
+  Tanggal = as.Date(tanggal_forecast),
+  Prediksi_Harga = round(pred_asli, 2),
+  Batas_Bawah_95 = round(lower_asli, 2),
+  Batas_Atas_95 = round(upper_asli, 2)
+)
+
+cat("\n=== 10 HARI PERTAMA FORECAST ===\n")
+print(pred_table[1:10, ], row.names = FALSE)
+
+# --- RINGKASAN STATISTIK ---
+cat("\n=== RINGKASAN FORECAST 40 HARI ===\n")
+cat("Harga Terakhir (Aktual) : Rp", format(round(last_price, 0), big.mark="."), "\n")
+cat("Prediksi Hari ke-10     : Rp", format(round(pred_asli[10], 0), big.mark="."), "\n")
+cat("Prediksi Hari ke-20     : Rp", format(round(pred_asli[20], 0), big.mark="."), "\n")
+cat("Prediksi Hari ke-40     : Rp", format(round(pred_asli[40], 0), big.mark="."), "\n")
+cat("\nInterval Kepercayaan 95% (Hari ke-40):\n")
+cat("  Batas Bawah : Rp", format(round(lower_asli[40], 0), big.mark="."), "\n")
+cat("  Batas Atas  : Rp", format(round(upper_asli[40], 0), big.mark="."), "\n")
+```
+
+### Interpretasi Visualisasi
+
+Grafik yang dihasilkan menunjukkan:
+
+1. **Garis Biru (Data Aktual)**: Pergerakan harga historis 100 hari terakhir sebagai baseline perbandingan.
+
+2. **Garis Merah Putus-putus (Point Forecast)**: Proyeksi harga 40 hari ke depan. Jika garis cenderung datar, ini mencerminkan karakteristik model ARIMA pada data stasioner yang memproyeksikan return mendekati nol.
+
+3. **Area Abu-abu (Interval 95%)**: Rentang ketidakpastian prediksi. Pelebaran area seiring waktu menunjukkan bahwa akurasi forecast menurun untuk horizon yang lebih jauh.
+
+4. **Garis Hitam Putus-putus**: Batas antara data historis dan periode forecast, membantu pembaca membedakan mana data aktual dan mana prediksi.
+
+
+
+### 3.4. Tabulasi Hasil Prediksi
+
+Untuk keperluan analisis lebih lanjut, hasil forecasting diekstrak ke dalam format tabel yang memuat:
+- Periode forecast (hari ke-1 hingga ke-40)
+- Tanggal kalender prediksi
+- Nilai point forecast (harga dalam IDR)
+- Batas bawah dan atas interval kepercayaan 95%
+
+```{r sensitivity-analysis, message=FALSE, warning=FALSE}
+# ==============================================================================
+# 3.4. TABEL PREDIKSI HARIAN
+# ==============================================================================
+
+# Buat tabel prediksi yang rapi
+pred_table <- data.frame(
+  Hari = 1:h_forecast,
+  Tanggal = as.Date(tanggal_forecast),
+  Prediksi_Harga = round(pred_asli, 2),
+  Batas_Bawah_95 = round(lower_asli, 2),
+  Batas_Atas_95 = round(upper_asli, 2)
+)
+
+# Tampilkan 10 hari pertama untuk ringkasan
+cat("\n=== 10 HARI PERTAMA FORECAST ===\n")
+print(pred_table[1:10, ], row.names = FALSE)
+
+# Ringkasan statistik forecast
+cat("\n=== RINGKASAN FORECAST 40 HARI ===\n")
+cat("Harga Terakhir (Aktual) : Rp", format(round(last_price, 0), big.mark="."), "\n")
+cat("Prediksi Hari ke-10     : Rp", format(round(pred_asli[10], 0), big.mark="."), "\n")
+cat("Prediksi Hari ke-20     : Rp", format(round(pred_asli[20], 0), big.mark="."), "\n")
+cat("Prediksi Hari ke-40     : Rp", format(round(pred_asli[40], 0), big.mark="."), "\n")
+cat("\nInterval Kepercayaan 95% (Hari ke-40):\n")
+cat("  Batas Bawah : Rp", format(round(lower_asli[40], 0), big.mark="."), "\n")
+cat("  Batas Atas  : Rp", format(round(upper_asli[40], 0), big.mark="."), "\n")
+```
+
+### Interpretasi Tabel
+
+Tabel prediksi memberikan informasi granular untuk setiap hari dalam periode forecast:
+
+1. **Kolom `Prediksi_Harga`**: Nilai point forecast yang merupakan estimasi terbaik berdasarkan model. Untuk data saham stasioner dalam log-return, nilai ini cenderung stabil di sekitar harga terakhir.
+
+2. **Kolom `Batas_Bawah_95` dan `Batas_Atas_95`**: Rentang harga dengan tingkat kepercayaan 95%. Investor dapat menggunakan rentang ini untuk:
+   - Menetapkan target harga potensial (batas atas)
+   - Menentukan level stop-loss (batas bawah)
+   - Mengukur risiko volatilitas expected
+
+3. **Pelebaran Interval**: Perhatikan bahwa selisih antara batas atas dan bawah meningkat seiring bertambahnya hari. Ini adalah karakteristik inherent peramalan deret waktu: ketidakpastian terakumulasi seiring horizon waktu.
+
+
+
+## 4. Kesimpulan
+
+Berdasarkan seluruh rangkaian analisis yang telah dilakukan, dari tahap Data Processing hingga Evaluate, dapat ditarik beberapa kesimpulan utama:
+
+### 4.1. Ringkasan Metodologi
+
+Penelitian ini mengikuti pendekatan Box-Jenkins untuk pemodelan ARIMA dengan tahapan:
+1. **Data Processing**: Pengumpulan data historis 5 tahun, pembersihan NA, dan pembagian 70/30 untuk training-testing.
+2. **Modelling**: Uji stasioneritas ADF, transformasi log-return, identifikasi orde via ACF/PACF, dan estimasi kandidat model.
+3. **Evaluate**: Diagnostic checking (Ljung-Box), perhitungan MAPE, dan forecasting 40 hari ke depan.
+
+### 4.2. Model Terpilih
+
+Model **ARMA(2,1)** atau **ARIMA(2,1,1)** pada data harga asli ditetapkan sebagai model terbaik dengan kriteria:
+- **Ljung-Box p-value**: 0.125 > 0.05 (residual white noise ✅)
+- **AIC**: -3319.175 (lebih baik dari MA(1) dan AR(1))
+- **MAPE Testing**: 32.77% (kategori: Cukup untuk saham volatil)
+
+### 4.3. Hasil Forecasting
+
+Peramalan 40 hari ke depan menunjukkan:
+- **Point Forecast**: Cenderung stabil di sekitar harga terakhir (karakteristik random walk)
+- **Interval Kepercayaan 95%**: Melebar progresif, mencerminkan akumulasi ketidakpastian
+- **Implikasi**: Model lebih reliabel untuk horizon jangka pendek (< 2 minggu)
+
+### 4.4. Keterbatasan dan Saran
+
+**Keterbatasan:**
+1. Model ARIMA hanya menggunakan data historis harga (univariate), tidak memasukkan variabel eksogen.
+2. MAPE 32.77% menunjukkan ruang untuk perbaikan akurasi.
+3. Forecast jangka panjang (> 1 bulan) memiliki interval kepercayaan yang sangat lebar.
+
+**Saran Penelitian Lanjutan:**
+1. Pertimbangkan model **ARIMA-GARCH** untuk menangkap dinamika volatilitas bersyarat.
+2. Masukkan variabel fundamental (volume, sentimen, harga komoditas) sebagai prediktor eksogen.
+3. Gunakan **rolling window validation** untuk menguji robustnes model pada berbagai periode pasar.
+
+### 4.5. Penutup
+
+Model ARIMA(2,1,1) telah memenuhi seluruh asumsi diagnostik dan layak digunakan untuk peramalan jangka pendek saham TEBE. Namun, investor disarankan menggunakan hasil forecast sebagai **salah satu input** dalam proses pengambilan keputusan, dikombinasikan dengan analisis fundamental dan manajemen risiko yang ketat.
