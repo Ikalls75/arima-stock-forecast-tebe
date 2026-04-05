@@ -175,7 +175,7 @@ legend("topleft", legend = c("Training (70%)", "Testing (30%)", "Batas Split"),
        lwd = c(2.5, 2.5, 2), bty = "n", cex = 0.9)
 ```
 
-![](arima_tebe_files/figure-gfm/unnamed-chunk-2-1.png)<!-- -->
+![](arima_tebe_files/figure-gfm/plot-data-split-1.png)<!-- -->
 
 ### Interpretasi
 
@@ -207,7 +207,7 @@ logaritma.
 
     ## P-value ADF (Log-Return): 0.01
 
-![](arima_tebe_files/figure-gfm/pressure-1.png)<!-- -->
+![](arima_tebe_files/figure-gfm/plot-stasioneritas-1.png)<!-- -->
 
 ### Interpretasi
 
@@ -248,7 +248,7 @@ acf(data_model, main = "ACF Data Model", col = "red")
 pacf(data_model, main = "PACF Data Model", col = "red")
 ```
 
-![](arima_tebe_files/figure-gfm/unnamed-chunk-3-1.png)<!-- -->
+![](arima_tebe_files/figure-gfm/plot-acf-pacf-1.png)<!-- -->
 
 ``` r
 par(mfrow = c(1, 1))
@@ -666,7 +666,7 @@ plot_forecast <- function() {
 plot_forecast()
 ```
 
-![](arima_tebe_files/figure-gfm/forecasting-complete-1.png)<!-- -->
+![](arima_tebe_files/figure-gfm/plot-hasil-forecast-1.png)<!-- -->
 
 ### Interpretasi Visualisasi
 
