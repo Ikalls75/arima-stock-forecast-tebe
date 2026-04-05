@@ -1,0 +1,2 @@
+load("/Users/ikalss/cooding/Rstudio/TEBE/arima-stock-forecast-tebe/script/output/arima_model.rds")
+load("/Users/ikalss/cooding/Rstudio/TEBE/arima-stock-forecast-tebe/script/output/arima_model.rds")

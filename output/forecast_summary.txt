@@ -1,0 +1,9 @@
+=== FORECAST SUMMARY ===
+Tanggal run: 20549 
+
+Harga terakhir: 1445 
+Prediksi hari ke-40: 1455.745 
+
+Interval 95% hari ke-40:
+Lower: 103.3774 
+Upper: 20499.56 

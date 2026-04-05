@@ -1,8 +1,11 @@
 ---
 title: "PROYEK PERAMALAN HARGA SAHAM TEBE MENGGUNAKAN MODEL ARIMA"
 author: "Haikal Al Faruqi"
-date: "2026-04-01"
-output: word_document
+date: "`r Sys.Date()`"
+output: 
+  github_document:
+    toc: true
+    toc_depth: 3
 ---
 
 ## 1. Data Processing
@@ -13,6 +16,12 @@ Tahap pertama dalam penelitian ini adalah pengumpulan dan pembersihan data. Data
 # ==============================================================================
 # 1.1. COLLECTING DAN CLEANING DATA
 # ==============================================================================
+# Konfigurasi awal dan pembuatan direktori output
+set.seed(123)
+dir.create("output", showWarnings = FALSE)
+dir.create("output/plots", showWarnings = FALSE)
+dir.create("output/tables", showWarnings = FALSE)
+dir.create("output/models", showWarnings = FALSE)
 
 # Load library yang diperlukan
 library(quantmod)
@@ -32,9 +41,8 @@ tanggal <- as.Date(index(TEBE.JK)[!is.na(Cl(TEBE.JK))])
 
 # Menampilkan informasi data
 cat("=== INFORMASI DATA ===\n")
-cat("Total Observasi :", length(harga_tebe), "hari perdagangan\n")
-cat("Periode Data    :", format(min(tanggal), "%d %B %Y"), 
-    "s/d", format(max(tanggal), "%d %B %Y"), "\n")
+cat("Total Observasi  :", length(harga_tebe), "hari perdagangan\n")
+cat("Periode Data     :", format(min(tanggal), "%d %B %Y"), "s/d", format(max(tanggal), "%d %B %Y"), "\n")
 cat("Harga Terakhir   : Rp", format(tail(harga_tebe, 1), big.mark="."), "\n")
 ```
 
@@ -48,62 +56,33 @@ Output di atas menunjukkan bahwa data berhasil diambil sebanyak `r length(harga_
 Sesuai standar metodologi deret waktu, data dibagi menjadi dua subset: **70% data training** untuk membangun model dan **30% data testing** untuk evaluasi performa prediktif. Pembagian ini dilakukan secara kronologis untuk menjaga integritas temporal data deret waktu.
 
 ```{r}
-# Pembagian Data 70% Training, 30% Testing
+# ==============================================================================
+# 1.2. PEMBAGIAN DATA & VISUALISASI
+# ==============================================================================
 n_total <- length(harga_tebe)
 n_train <- floor(n_total * 0.70)
 
 train_data <- harga_tebe[1:n_train]
 test_data  <- harga_tebe[(n_train + 1):n_total]
 
-train_date <- tanggal[1:n_train]
-test_date  <- tanggal[(n_train + 1):n_total]
-
 cat("\n=== PEMBAGIAN DATA ===\n")
 cat("Data Training:", length(train_data), "hari (70%)\n")
 cat("Data Testing :", length(test_data), "hari (30%)\n")
 
-# ==============================================================================
-# VISUALISASI PEMBAGIAN DATA (VERSI DIPERBAIKI)
-# Referensi: 9478.pdf (Gambar 1 - Flowchart Tahapan Penelitian)
-# ==============================================================================
-
-# 1. Plot dasar (Full Data) sebagai background
-plot(harga_tebe, 
-     type = "l", 
-     col = "lightgray", 
-     lwd = 1, 
+# Visualisasi Pembagian Data
+plot(harga_tebe, type = "l", col = "lightgray", lwd = 1, 
      main = "Pembagian Data Training & Testing",
-     xlab = "Waktu (Indeks Hari)", 
-     ylab = "Harga (IDR)",
+     xlab = "Waktu (Indeks Hari)", ylab = "Harga (IDR)",
      ylim = c(min(harga_tebe), max(harga_tebe)))
 
-# 2. Overlay Data Training (Biru)
-# Gunakan indeks eksplisit 1:n_train agar sejajar dengan plot dasar
-lines(1:n_train, harga_tebe[1:n_train], 
-      col = "blue", 
-      lwd = 2.5)
-
-# 3. Overlay Data Testing (Merah)
-# Gunakan indeks eksplisit (n_train+1):n_total
-lines((n_train + 1):n_total, harga_tebe[(n_train + 1):n_total], 
-      col = "red", 
-      lwd = 2.5)
-
-# 4. Garis Batas Split (Hitam Putus-putus)
-abline(v = n_train, 
-       col = "black", 
-       lty = 2, 
-       lwd = 2)
-
-# 5. Grid & Legend
+lines(1:n_train, train_data, col = "blue", lwd = 2.5)
+lines((n_train + 1):n_total, test_data, col = "red", lwd = 2.5)
+abline(v = n_train, col = "black", lty = 2, lwd = 2)
 grid(col = "lightgray", lty = 2)
-legend("topleft", 
-       legend = c("Training (70%)", "Testing (30%)", "Batas Split"),
-       col = c("blue", "red", "black"), 
-       lty = c(1, 1, 2), 
-       lwd = c(2.5, 2.5, 2), 
-       bty = "n",
-       cex = 0.9)
+
+legend("topleft", legend = c("Training (70%)", "Testing (30%)", "Batas Split"),
+       col = c("blue", "red", "black"), lty = c(1, 1, 2), 
+       lwd = c(2.5, 2.5, 2), bty = "n", cex = 0.9)
 ```
 
 ### Interpretasi
@@ -125,74 +104,39 @@ Jika data tidak stasioner (p-value > 0.05), dilakukan transformasi **log-return*
 
 
 ```{r pressure, echo=FALSE}
-# Uji ADF pada Data Training (Harga Asli)
+# ==============================================================================
+# 1.3. UJI STASIONERITAS & TRANSFORMASI
+# ==============================================================================
 adf_asli <- adf.test(train_data)
-cat("\n=== UJI ADF DATA TRAINING (ASLI) ===\n")
-print(adf_asli)
+cat("P-value ADF (Data Asli):", adf_asli$p.value, "\n")
 
-# Transformasi Log-Return (Jika p-value > 0.05)
 if(adf_asli$p.value > 0.05){
-  cat("\nData tidak stasioner. Melakukan transformasi Log-Return...\n")
+  cat("Data tidak stasioner. Melakukan transformasi Log-Return...\n")
   log_train <- log(train_data)
   diff_train <- diff(log_train)
-  diff_train <- diff_train[!is.na(diff_train)]
+  data_model <- diff_train[!is.na(diff_train)]
   
-  # Uji ADF pada Data Transformasi
- adf_trans <- adf.test(diff_train)
-  cat("\n=== UJI ADF DATA TRAINING (LOG-RETURN) ===\n")
-  print(adf_trans)
-  
-  data_model <- diff_train
+  adf_trans <- adf.test(data_model)
+  cat("P-value ADF (Log-Return):", adf_trans$p.value, "\n")
   is_transformed <- TRUE
 } else {
   data_model <- train_data
   is_transformed <- FALSE
 }
 
-
-# ==============================================================================
-# VISUALISASI PERBANDINGAN: DATA ASLI VS LOG-RETURN
-# Referensi: document.pdf (Transformasi Data) & Kuliah 11.pdf (Studi Kasus BBCA)
-# ==============================================================================
-
-# Atur layout grafis (2 baris, 1 kolom)
+# Visualisasi Perbandingan
 par(mfrow = c(2, 1), mar = c(4, 4, 2, 1))
 
-# --- PANEL 1: Data Training Asli (Non-Stasioner) ---
-plot.ts(train_data, 
-        main = "Gambar 1. Data Harga Training (Non-Stasioner)", 
-        ylab = "Harga (IDR)", 
-        xlab = "",
-        col = "steelblue", 
-        lwd = 1.5,
-        cex.main = 0.9)
+# Panel 1: Data Asli
+plot.ts(train_data, main = "Data Harga Training (Non-Stasioner)", 
+        ylab = "Harga (IDR)", col = "steelblue", lwd = 1.5)
 abline(h = mean(train_data), col = "red", lty = 2, lwd = 2)
-legend("topleft", 
-       legend = c("Harga", "Mean"), 
-       col = c("steelblue", "red"), 
-       lty = c(1, 2), 
-       lwd = c(1.5, 2), 
-       bty = "n", 
-       cex = 0.7)
 
-# --- PANEL 2: Data Log-Return (Stasioner) ---
-plot.ts(diff_train, 
-        main = "Gambar 2. Log-Return Training (Stasioner)", 
-        ylab = "Log-Return", 
-        xlab = "Waktu",
-        col = "darkgreen", 
-        lwd = 1.5,
-        cex.main = 0.9)
+# Panel 2: Log-Return
+plot.ts(data_model, main = "Log-Return Training (Stasioner)", 
+        ylab = "Log-Return", col = "darkgreen", lwd = 1.5)
 abline(h = 0, col = "red", lty = 2, lwd = 2)
-legend("topright", 
-       legend = c("Log-Return", "Mean = 0"), 
-       col = c("darkgreen", "red"), 
-       lty = c(1, 2), 
-       lwd = c(1.5, 2), 
-       bty = "n", 
-       cex = 0.7)
 
-# Kembalikan layout ke default
 par(mfrow = c(1, 1))
 ```
 
@@ -217,33 +161,11 @@ Pola cut-off (terputus) atau tail-off (menurun perlahan) pada kedua plot ini men
 # ==============================================================================
 # 2.1. IDENTIFIKASI ORDE MODEL (ACF & PACF)
 # ==============================================================================
-
-# Mengatur layout grafik menjadi 2x2 untuk perbandingan
 par(mfrow = c(2, 2))
-
-# Plot data training asli (harga)
-plot.ts(train_data, 
-        main = "Data Training (Harga)", 
-        col = "blue", 
-        lwd = 2)
-
-# Plot data model (log-return yang sudah stasioner)
-plot.ts(data_model, 
-        main = "Data Model (Stasioner)", 
-        col = "green", 
-        lwd = 2)
-
-# Plot ACF data model
-acf(data_model, 
-    main = "ACF Data Model", 
-    col = "red")
-
-# Plot PACF data model
-pacf(data_model, 
-     main = "PACF Data Model", 
-     col = "red")
-
-# Mengembalikan layout ke default
+plot.ts(train_data, main = "Data Training (Harga)", col = "blue", lwd = 2)
+plot.ts(data_model, main = "Data Model (Stasioner)", col = "green", lwd = 2)
+acf(data_model, main = "ACF Data Model", col = "red")
+pacf(data_model, main = "PACF Data Model", col = "red")
 par(mfrow = c(1, 1))
 ```
 
@@ -277,28 +199,26 @@ Parameter `include.mean = FALSE` digunakan karena log-return saham umumnya berfl
 
 ```{r}
 # ==============================================================================
-# 2.2. ESTIMASI PARAMETER MODEL
+# 2.2. ESTIMASI & PEMILIHAN MODEL (AIC/BIC)
 # ==============================================================================
+models <- list(
+  AR1 = arima(data_model, order = c(1, 0, 0), include.mean = FALSE),
+  MA1 = arima(data_model, order = c(0, 0, 1), include.mean = FALSE),
+  ARMA11 = arima(data_model, order = c(1, 0, 1), include.mean = FALSE)
+)
 
-# Estimasi model AR(1) - Autoregressive orde 1
-model_ar1 <- arima(data_model, 
-                   order = c(1, 0, 0), 
-                   include.mean = FALSE)
+model_compare <- data.frame(
+  Model = names(models),
+  AIC = round(sapply(models, AIC), 3),
+  BIC = round(sapply(models, BIC), 3)
+)
+model_compare <- model_compare[order(model_compare$AIC), ]
 
-# Estimasi model MA(1) - Moving Average orde 1
-model_ma1 <- arima(data_model, 
-                   order = c(0, 0, 1), 
-                   include.mean = FALSE)
+cat("=== PERBANDINGAN MODEL ===\n")
+print(model_compare)
 
-# Estimasi model ARMA(1,1) - Kombinasi AR dan MA
-model_arma11 <- arima(data_model, 
-                      order = c(1, 0, 1), 
-                      include.mean = FALSE)
-
-# Menyimpan semua model dalam list untuk perbandingan
-models <- list(AR1 = model_ar1, 
-               MA1 = model_ma1, 
-               ARMA11 = model_arma11)
+best_model_name <- rownames(model_compare)[1]
+best_model <- models[[best_model_name]]
 ```
 
 ### Interpretasi
@@ -324,34 +244,26 @@ Prinsip pemilihan:
 
 ```{r}
 # ==============================================================================
-# 2.3. PEMILIHAN MODEL TERBAIK (AIC & BIC)
+# 2.2. ESTIMASI & PEMILIHAN MODEL (AIC/BIC)
 # ==============================================================================
-
-# Menghitung nilai AIC untuk semua model
-aic_vals <- sapply(models, AIC)
-
-# Menghitung nilai BIC untuk semua model
-bic_vals <- sapply(models, BIC)
-
-# Membuat tabel perbandingan model
-model_compare <- data.frame(
-  Model = names(models),
-  AIC = round(aic_vals, 3),
-  BIC = round(bic_vals, 3)
+models <- list(
+  AR1 = arima(data_model, order = c(1, 0, 0), include.mean = FALSE),
+  MA1 = arima(data_model, order = c(0, 0, 1), include.mean = FALSE),
+  ARMA11 = arima(data_model, order = c(1, 0, 1), include.mean = FALSE)
 )
 
-# Mengurutkan berdasarkan AIC terkecil
+model_compare <- data.frame(
+  Model = names(models),
+  AIC = round(sapply(models, AIC), 3),
+  BIC = round(sapply(models, BIC), 3)
+)
 model_compare <- model_compare[order(model_compare$AIC), ]
 
-# Menampilkan hasil perbandingan
-cat("\n=== PERBANDINGAN MODEL ===\n")
+cat("=== PERBANDINGAN MODEL ===\n")
 print(model_compare)
 
-# Menentukan model terbaik berdasarkan AIC terendah
 best_model_name <- rownames(model_compare)[1]
 best_model <- models[[best_model_name]]
-
-cat("\nModel Terpilih (Berdasarkan AIC):", best_model_name, "\n")
 ```
 
 ### Interpretasi
@@ -387,40 +299,20 @@ Keputusan: Terima H₀ jika p-value > 0.05. Jika model terpilih gagal uji ini, m
 
 ```{r}
 # ==============================================================================
-# 2.4. VALIDASI DIAGNOSTIK AWAL (LJUNG-BOX TEST)
+# 2.3. UJI LJUNG-BOX
 # ==============================================================================
+ljung_best <- Box.test(residuals(best_model), lag = 20, type = "Ljung-Box")
 
-# Uji Ljung-Box pada model terpilih (MA1)
-ljung_ma1 <- Box.test(residuals(model_ma1), lag = 20, type = "Ljung-Box")
-
-cat("\n=== UJI LJUNG-BOX MODEL MA(1) ===\n")
-print(ljung_ma1)
-
-# Jika MA(1) gagal (p-value < 0.05), estimasi model alternatif ARMA(2,1)
-if(ljung_ma1$p.value < 0.05){
-  cat("\n⚠️ MA(1) GAGAL uji diagnostik (p-value < 0.05)\n")
-  cat("Melakukan estimasi model alternatif ARMA(2,1)...\n")
-  
-  # Estimasi ARMA(2,1)
-  model_arma21 <- arima(data_model, 
-                        order = c(2, 0, 1), 
-                        include.mean = FALSE)
-  
-  # Uji Ljung-Box pada ARMA(2,1)
-  ljung_arma21 <- Box.test(residuals(model_arma21), lag = 20, type = "Ljung-Box")
-  
-  cat("\n=== UJI LJUNG-BOX MODEL ARMA(2,1) ===\n")
-  print(ljung_arma21)
-  
-  # Update model terbaik jika ARMA(2,1) lolos
-  if(ljung_arma21$p.value > 0.05){
-    best_model <- model_arma21
-    best_model_name <- "ARMA(2,1)"
-    cat("\n✅ ARMA(2,1) LOLOS uji diagnostik. Model final:", best_model_name, "\n")
-  }
-} else {
-  cat("\n✅ MA(1) LOLOS uji diagnostik. Model final:", best_model_name, "\n")
+if(ljung_best$p.value < 0.05){
+  cat("⚠️ Model awal gagal uji diagnostik. Mencoba ARMA(2,1)...\n")
+  best_model <- arima(data_model, order = c(2, 0, 1), include.mean = FALSE)
+  best_model_name <- "ARMA(2,1)"
+  ljung_best <- Box.test(residuals(best_model), lag = 20, type = "Ljung-Box")
 }
+
+cat("Model Final:", best_model_name, "\n")
+cat("P-Value Ljung-Box:", round(ljung_best$p.value, 4), "\n")
+
 ```
 
 ### Interpretasi
@@ -456,39 +348,17 @@ Setelah model terbaik dipilih berdasarkan kriteria AIC, tahap evaluasi dilakukan
 
 ```{r}
 # ==============================================================================
-# 3.1. EVALUATING MODEL (DIAGNOSTIC & MAPE)
+# 3.1. EVALUATING MODEL (MAPE)
 # ==============================================================================
-
-# 1. Diagnostic Check (Ljung-Box Test)
-ljung_box <- Box.test(residuals(best_model), lag = 20, type = "Ljung-Box")
-cat("\n=== UJI DIAGNOSTIC (LJUNG-BOX) ===\n")
-print(ljung_box)
-
-# 2. Forecast pada periode testing untuk hitung MAPE
 h_test <- length(test_data)
 fc_test <- forecast(best_model, h = h_test)
 
-# Back-transformation ke skala harga asli
+# Back-transformation
 last_train_log <- log(tail(train_data, 1))
-pred_test_log <- last_train_log + cumsum(as.numeric(fc_test$mean))
-pred_test_asli <- exp(pred_test_log)
+pred_test_asli <- exp(last_train_log + cumsum(as.numeric(fc_test$mean)))
 
-# Hitung MAPE pada data testing
 mape_value <- mean(abs((test_data - pred_test_asli) / test_data)) * 100
-
-cat("\n=== AKURASI MODEL (DATA TESTING) ===\n")
-cat("MAPE:", round(mape_value, 2), "%\n")
-
-# Kategorisasi MAPE
-if(mape_value < 10){
-  cat("Kategori: Sangat Akurat\n")
-} else if(mape_value < 20){
-  cat("Kategori: Baik\n")
-} else if(mape_value < 50){
-  cat("Kategori: Cukup (Wajar untuk data saham volatil)\n")
-} else {
-  cat("Kategori: Kurang Akurat\n")
-}
+cat("Akurasi Model (MAPE Data Testing):", round(mape_value, 2), "%\n")
 ```
 
 ### Interpretasi
@@ -572,124 +442,59 @@ Visualisasi dilakukan untuk menyajikan hasil forecasting secara grafis, mencakup
 
 ```{r forecasting-complete, message=FALSE, warning=FALSE, fig.width=12, fig.height=7}
 # ==============================================================================
-# FORECASTING 40 HARI KE DEPAN - LENGKAP & SELF-CONTAINED
-# Model: ARMA(2,1) pada log-return = ARIMA(2,1,1) pada harga asli
-# Referensi: 9478.pdf (Forecasting) & document.pdf (Langkah 7)
+# 3.2. EKSEKUSI FORECASTING & VISUALISASI
 # ==============================================================================
-
-# --- DEFINISI PARAMETER (Termasuk h_forecast) ---
-h_forecast <- 40  # 40 hari perdagangan (~2 bulan)
-
-# --- PASTIKAN MODEL TERPILIH SUDAH ADA ---
-# Jika best_model belum ada, gunakan ARMA(2,1) yang sudah terverifikasi
-if(!exists("best_model")){
-  best_model <- arima(data_model, order = c(2, 0, 1), include.mean = FALSE)
-  cat("Model ARMA(2,1) diestimasi ulang untuk forecasting.\n")
-}
-
-# --- EKSEKUSI FORECAST ---
+h_forecast <- 40
 fc_return <- forecast(best_model, h = h_forecast)
 
-# --- BACK-TRANSFORMATION: Log-Return → Harga Asli (IDR) ---
 last_price <- tail(harga_tebe, 1)
 last_log <- log(last_price)
 
-# Kembalikan dari differencing log ke level log (cumulative sum)
-pred_log <- last_log + cumsum(as.numeric(fc_return$mean))
+pred_asli <- exp(last_log + cumsum(as.numeric(fc_return$mean)))
+lower_asli <- exp(last_log + cumsum(as.numeric(fc_return$lower[, "95%"])))
+upper_asli <- exp(last_log + cumsum(as.numeric(fc_return$upper[, "95%"])))
 
-# Kembalikan dari log ke harga asli (exponential)
-pred_asli <- exp(pred_log)
+tanggal_forecast <- seq(tail(tanggal, 1), by = "day", length.out = h_forecast + 1)[-1]
 
-# Interval kepercayaan 95% (back-transformed)
-lower_log <- last_log + cumsum(as.numeric(fc_return$lower[, "95%"]))
-upper_log <- last_log + cumsum(as.numeric(fc_return$upper[, "95%"]))
-lower_asli <- exp(lower_log)
-upper_asli <- exp(upper_log)
+# Fungsi Visualisasi agar memenuhi prinsip DRY (Don't Repeat Yourself)
+plot_forecast <- function() {
+  n_zoom <- 100
+  idx_start <- length(harga_tebe) - n_zoom + 1
+  harga_zoom <- harga_tebe[idx_start:length(harga_tebe)]
+  tanggal_zoom <- tanggal[idx_start:length(harga_tebe)]
+  
+  ylim_min <- min(c(harga_zoom, lower_asli)) * 0.90
+  ylim_max <- max(c(harga_zoom, upper_asli)) * 1.10
+  
+  plot(tanggal_zoom, harga_zoom, type = "l", col = "steelblue", lwd = 2.5,
+       xlab = "Tanggal", ylab = "Harga (IDR)",
+       main = "Peramalan Harga Saham TEBE: 40 Hari Ke Depan\n(Interval Kepercayaan 95%)",
+       xlim = c(tanggal_zoom[1], tail(tanggal_forecast, 1)),
+       ylim = c(ylim_min, ylim_max), xaxt = "n")
+  
+  axis.Date(1, at = seq(min(tanggal_zoom), max(tanggal_forecast), by = "2 weeks"), 
+            format = "%d-%b", cex.axis = 0.8)
+  
+  polygon(c(tanggal_forecast, rev(tanggal_forecast)),
+          c(upper_asli, rev(lower_asli)), col = "gray85", border = NA)
+  
+  lines(tanggal_forecast, pred_asli, col = "red", lwd = 3, lty = 2)
+  abline(v = tail(tanggal_zoom, 1), col = "black", lty = 3, lwd = 2)
+  grid(col = "lightgray", lty = 2)
+  
+  legend("topleft",
+         legend = c("Data Aktual (100 Hari)", "Forecast Point", "Interval 95%", "Batas Forecast"),
+         col = c("steelblue", "red", "gray85", "black"),
+         lty = c(1, 2, NA, 3), lwd = c(2.5, 3, NA, 2),
+         fill = c(NA, NA, "gray85", NA), bty = "n", cex = 0.85)
+  
+  mtext(sprintf("Model: %s | MAPE: %.2f%% | Ljung-Box p-value: %.3f", 
+                best_model_name, mape_value, ljung_best$p.value),
+        side = 3, line = 0.05, cex = 0.9, col = "darkgray")
+}
 
-# --- PERSIAPAN TANGGAL FORECAST ---
-last_date <- tail(tanggal, 1)
-tanggal_forecast <- seq(last_date, by = "day", length.out = h_forecast + 1)[-1]
-
-# --- VISUALISASI FORECAST DENGAN INTERVAL KEPERCAYAAN ---
-# Zoom data historis terakhir (100 hari) untuk konteks yang jelas
-n_zoom <- 100
-idx_start <- length(harga_tebe) - n_zoom + 1
-harga_zoom <- harga_tebe[idx_start:length(harga_tebe)]
-tanggal_zoom <- tanggal[idx_start:length(harga_tebe)]
-
-# Hitung ylim yang mencakup data historis + interval kepercayaan
-all_values <- c(harga_zoom, pred_asli, lower_asli, upper_asli)
-ylim_min <- min(all_values, na.rm = TRUE) * 0.90
-ylim_max <- max(all_values, na.rm = TRUE) * 1.10
-
-# Plot utama
-plot(tanggal_zoom, harga_zoom,
-     type = "l",
-     col = "steelblue",
-     lwd = 2.5,
-     xlab = "Tanggal",
-     ylab = "Harga (IDR)",
-     main = "Peramalan Harga Saham TEBE: 40 Hari Ke Depan\n(Model ARIMA(2,1,1) dengan Interval Kepercayaan 95%)",
-     xlim = c(tanggal_zoom[1], tanggal_forecast[h_forecast]),
-     ylim = c(ylim_min, ylim_max),
-     xaxt = "n")  # Supaya bisa format tanggal manual
-
-# Format sumbu X agar mudah dibaca
-axis.Date(1, at = seq(min(tanggal_zoom), max(tanggal_forecast), by = "2 weeks"), 
-          format = "%d-%b", cex.axis = 0.8)
-
-# Tambahkan interval kepercayaan 95% (area abu-abu)
-polygon(c(tanggal_forecast, rev(tanggal_forecast)),
-        c(upper_asli, rev(lower_asli)),
-        col = "gray85", border = NA)
-
-# Tambahkan garis forecast (point forecast)
-lines(tanggal_forecast, pred_asli, col = "red", lwd = 3, lty = 2)
-
-# Tambahkan garis pemisah vertikal (batas historis vs forecast)
-abline(v = tail(tanggal_zoom, 1), col = "black", lty = 3, lwd = 2)
-
-# Grid untuk kemudahan membaca
-grid(col = "lightgray", lty = 2)
-
-# Legend yang informatif
-legend("topleft",
-       legend = c("Data Aktual (100 Hari)", 
-                  "Forecast Point (ARIMA(2,1,1))", 
-                  "Interval Kepercayaan 95%",
-                  "Batas Forecast"),
-       col = c("steelblue", "red", "gray85", "black"),
-       lty = c(1, 2, NA, 3),
-       lwd = c(2.5, 3, NA, 2),
-       fill = c(NA, NA, "gray85", NA),
-       bty = "n",
-       cex = 0.85)
-
-# Anotasi model dan akurasi
-mtext(sprintf("Model: ARIMA(2,1,1) | MAPE Testing: 32.77%% | Ljung-Box p-value: 0.125"),
-      side = 3, line = 0.5, cex = 0.9, col = "darkgray")
-
-# --- TABEL PREDIKSI HARIAN ---
-pred_table <- data.frame(
-  Hari = 1:h_forecast,
-  Tanggal = as.Date(tanggal_forecast),
-  Prediksi_Harga = round(pred_asli, 2),
-  Batas_Bawah_95 = round(lower_asli, 2),
-  Batas_Atas_95 = round(upper_asli, 2)
-)
-
-cat("\n=== 10 HARI PERTAMA FORECAST ===\n")
-print(pred_table[1:10, ], row.names = FALSE)
-
-# --- RINGKASAN STATISTIK ---
-cat("\n=== RINGKASAN FORECAST 40 HARI ===\n")
-cat("Harga Terakhir (Aktual) : Rp", format(round(last_price, 0), big.mark="."), "\n")
-cat("Prediksi Hari ke-10     : Rp", format(round(pred_asli[10], 0), big.mark="."), "\n")
-cat("Prediksi Hari ke-20     : Rp", format(round(pred_asli[20], 0), big.mark="."), "\n")
-cat("Prediksi Hari ke-40     : Rp", format(round(pred_asli[40], 0), big.mark="."), "\n")
-cat("\nInterval Kepercayaan 95% (Hari ke-40):\n")
-cat("  Batas Bawah : Rp", format(round(lower_asli[40], 0), big.mark="."), "\n")
-cat("  Batas Atas  : Rp", format(round(upper_asli[40], 0), big.mark="."), "\n")
+# Tampilkan Plot
+plot_forecast()
 ```
 
 ### Interpretasi Visualisasi
@@ -716,10 +521,8 @@ Untuk keperluan analisis lebih lanjut, hasil forecasting diekstrak ke dalam form
 
 ```{r sensitivity-analysis, message=FALSE, warning=FALSE}
 # ==============================================================================
-# 3.4. TABEL PREDIKSI HARIAN
+# 3.3. TABEL PREDIKSI & PENYIMPANAN
 # ==============================================================================
-
-# Buat tabel prediksi yang rapi
 pred_table <- data.frame(
   Hari = 1:h_forecast,
   Tanggal = as.Date(tanggal_forecast),
@@ -728,19 +531,17 @@ pred_table <- data.frame(
   Batas_Atas_95 = round(upper_asli, 2)
 )
 
-# Tampilkan 10 hari pertama untuk ringkasan
-cat("\n=== 10 HARI PERTAMA FORECAST ===\n")
-print(pred_table[1:10, ], row.names = FALSE)
+# Simpan Artefak
+saveRDS(best_model, "output/models/best_arima_model.rds")
+saveRDS(fc_return, "output/models/forecast_object.rds")
+write.csv(pred_table, "output/tables/forecast_40_days.csv", row.names = FALSE)
 
-# Ringkasan statistik forecast
-cat("\n=== RINGKASAN FORECAST 40 HARI ===\n")
-cat("Harga Terakhir (Aktual) : Rp", format(round(last_price, 0), big.mark="."), "\n")
-cat("Prediksi Hari ke-10     : Rp", format(round(pred_asli[10], 0), big.mark="."), "\n")
-cat("Prediksi Hari ke-20     : Rp", format(round(pred_asli[20], 0), big.mark="."), "\n")
-cat("Prediksi Hari ke-40     : Rp", format(round(pred_asli[40], 0), big.mark="."), "\n")
-cat("\nInterval Kepercayaan 95% (Hari ke-40):\n")
-cat("  Batas Bawah : Rp", format(round(lower_asli[40], 0), big.mark="."), "\n")
-cat("  Batas Atas  : Rp", format(round(upper_asli[40], 0), big.mark="."), "\n")
+# Simpan Plot secara efisien
+png("output/plots/forecast_plot.png", width = 1200, height = 700)
+plot_forecast()
+invisible(dev.off())
+
+cat("✅ Seluruh artefak data (Plot, Tabel CSV, dan Model RDS) berhasil diekspor ke folder /output.")
 ```
 
 ### Interpretasi Tabel
@@ -798,3 +599,4 @@ Peramalan 40 hari ke depan menunjukkan:
 ### 4.5. Penutup
 
 Model ARIMA(2,1,1) telah memenuhi seluruh asumsi diagnostik dan layak digunakan untuk peramalan jangka pendek saham TEBE. Namun, investor disarankan menggunakan hasil forecast sebagai **salah satu input** dalam proses pengambilan keputusan, dikombinasikan dengan analisis fundamental dan manajemen risiko yang ketat.
+
